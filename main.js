@@ -6,7 +6,6 @@
   const STORE = 'addons';
   const MAX_ADDON_BYTES = 100 * 1024 * 1024;
   const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
-  const allowedAddonExtensions = ['mcaddon', 'mcpack', 'zip'];
   const allowedImageTypes = ['image/jpeg', 'image/png', 'image/webp'];
   const categoryIcons = { Adventure: '🧭', Blocks: '🧱', Cosmetics: '✨', Mobs: '🐾', Tools: '⚒️', Other: '🌿' };
 
@@ -18,6 +17,9 @@
   const errorBox = document.getElementById('formError');
   const submitButton = document.getElementById('submitUpload');
   const toast = document.getElementById('toast');
+  const addonFileInput = document.getElementById('addonFile');
+  addonFileInput.removeAttribute('accept');
+  addonFileInput.nextElementSibling.textContent = 'Minecraft packs/worlds and other file types · Max 100 MB';
   let db;
   let addons = [];
   let toastTimer;
@@ -200,17 +202,12 @@
     const values = new FormData(form);
     const file = values.get('file');
     const image = values.get('image');
-    const extension = file?.name.split('.').pop()?.toLowerCase();
     if (!(file instanceof File) || !file.size) {
-      errorBox.textContent = 'Choose an add-on file to upload.';
-      return;
-    }
-    if (!allowedAddonExtensions.includes(extension)) {
-      errorBox.textContent = 'Please choose a .mcaddon, .mcpack, or .zip file.';
+      errorBox.textContent = 'Choose a file to upload.';
       return;
     }
     if (file.size > MAX_ADDON_BYTES) {
-      errorBox.textContent = 'Add-on files must be 100 MB or smaller.';
+      errorBox.textContent = 'Files must be 100 MB or smaller.';
       return;
     }
     if (image instanceof File && image.size) {
