@@ -23,8 +23,10 @@ const ADMIN_ENABLED = Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET && SESSIO
 const ADMIN_COOKIE = 'marketplace_admin';
 const OAUTH_STATE_COOKIE = 'marketplace_oauth_state';
 const ADMIN_COOKIE_MAX_AGE = 8 * 60 * 60 * 1000;
+const OAUTH_STATE_MAX_AGE = 10 * 60 * 1000;
 
-if (!ADMIN_ENABLED) console.warn('Admin mode is disabled. Configure GitHub OAuth credentials and a SESSION_SECRET (32+ characters).');
+if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
+if (!ADMIN_ENABLED) console.warn('Admin mode is disabled. Configure GitHub OAuth credentials and SESSION_SECRET (32+ characters).');
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const db = new Database(path.join(DATA_DIR, 'marketplace.sqlite'));
@@ -67,7 +69,7 @@ const upload = multer({
 });
 
 const uploadLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Upload limit reached. Please try again in a little while.' } });
-const oauthLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many login attempts. Try again in a little while.' } });
+const oauthLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many admin login attempts. Try again in a little while.' } });
 
 function cleanOriginalName(value) {
   const basename = path.posix.basename(String(value || '').replace(/\\/g, '/'));
@@ -91,7 +93,7 @@ function parseCookies(header) {
   for (const part of header.split(';')) {
     const index = part.indexOf('=');
     if (index < 0) continue;
-    try { cookies[part.slice(0, index).trim()] = decodeURIComponent(part.slice(index + 1).trim()); } catch { /* Ignore malformed cookie. */ }
+    try { cookies[part.slice(0, index).trim()] = decodeURIComponent(part.slice(index + 1).trim()); } catch { /* Ignore malformed cookies. */ }
   }
   return cookies;
 }
@@ -102,100 +104,115 @@ function safeEqual(a, b) {
   return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
-function sign(value) {
+function signature(value) {
   return crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('base64url');
 }
 
-function signedValue(value) { return `${value}.${sign(value)}`; }
+function signedValue(value) { return `${value}.${signature(value)}`; }
+
 function verifySignedValue(value) {
   if (!value) return null;
   const separator = value.lastIndexOf('.');
   if (separator < 1) return null;
   const payload = value.slice(0, separator);
-  return safeEqual(value.slice(separator + 1), sign(payload)) ? payload : null;
+  return safeEqual(value.slice(separator + 1), signature(payload)) ? payload : null;
 }
 
-function isAdmin(req) {
-  if (!ADMIN_ENABLED) return false;
-  const payload = verifySignedValue(parseCookies(req.headers.cookie || '')[ADMIN_COOKIE]);
-  if (!payload) return false;
+function sessionFor(req) {
+  if (!ADMIN_ENABLED) return null;
+  const signed = parseCookies(req.headers.cookie || '')[ADMIN_COOKIE];
+  const payload = verifySignedValue(signed);
+  if (!payload) return null;
   try {
     const session = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    return session.username === ADMIN_GITHUB_USERNAME && Number.isFinite(session.expiresAt) && session.expiresAt > Date.now();
+    if (session.username !== ADMIN_GITHUB_USERNAME || !Number.isFinite(session.expiresAt) || session.expiresAt <= Date.now()) return null;
+    return session;
+  } catch { return null; }
+}
+
+function isAdmin(req) { return Boolean(sessionFor(req)); }
+
+function requestOriginMatches(req) {
+  const origin = req.get('origin');
+  if (!origin) return false;
+  try {
+    const parsed = new URL(origin);
+    return parsed.host === req.get('host') && parsed.protocol === `${req.protocol}:`;
   } catch { return false; }
 }
 
 function requireAdmin(req, res, next) {
   if (!ADMIN_ENABLED) return res.status(503).json({ error: 'GitHub admin login is not configured on this server.' });
   if (!isAdmin(req)) return res.status(401).json({ error: 'Admin login required.' });
-  const origin = req.get('origin');
-  if (!origin || origin !== `${req.protocol}://${req.get('host')}` || req.get('x-admin-action') !== 'true') {
-    return res.status(403).json({ error: 'Request could not be verified. Reload the page and try again.' });
-  }
+  if (!requestOriginMatches(req) || req.get('x-admin-action') !== 'true') return res.status(403).json({ error: 'Request could not be verified. Reload the page and try again.' });
   next();
 }
 
-function cookieOptions(maxAge) {
-  return { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge, path: '/' };
+function cookieOptions(maxAge, sameSite = 'lax') {
+  return { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite, maxAge, path: '/' };
 }
 
-function callbackUrl(req) {
+function oauthCallbackUrl(req) {
   return process.env.GITHUB_CALLBACK_URL || `${req.protocol}://${req.get('host')}/api/admin/github/callback`;
 }
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
-app.get('/api/admin/status', (req, res) => res.json({ enabled: ADMIN_ENABLED, authenticated: isAdmin(req), username: isAdmin(req) ? ADMIN_GITHUB_USERNAME : null }));
+
+app.get('/api/admin/status', (req, res) => {
+  const session = sessionFor(req);
+  res.json({ enabled: ADMIN_ENABLED, authenticated: Boolean(session), username: session?.username || null });
+});
 
 app.get('/api/admin/github', oauthLimiter, (req, res) => {
-  if (!ADMIN_ENABLED) return res.status(503).send('GitHub admin login is not configured on this server.');
+  if (!ADMIN_ENABLED) return res.status(503).send('GitHub admin sign-in is not configured on this server.');
   const state = crypto.randomBytes(32).toString('base64url');
-  res.cookie(OAUTH_STATE_COOKIE, signedValue(state), cookieOptions(10 * 60 * 1000));
-  const authorize = new URL('https://github.com/login/oauth/authorize');
-  authorize.searchParams.set('client_id', GITHUB_CLIENT_ID);
-  authorize.searchParams.set('redirect_uri', callbackUrl(req));
-  authorize.searchParams.set('scope', 'read:user');
-  authorize.searchParams.set('state', state);
-  res.redirect(authorize.toString());
+  res.cookie(OAUTH_STATE_COOKIE, signedValue(state), cookieOptions(OAUTH_STATE_MAX_AGE));
+  const authorizeUrl = new URL('https://github.com/login/oauth/authorize');
+  authorizeUrl.searchParams.set('client_id', GITHUB_CLIENT_ID);
+  authorizeUrl.searchParams.set('redirect_uri', oauthCallbackUrl(req));
+  authorizeUrl.searchParams.set('scope', 'read:user');
+  authorizeUrl.searchParams.set('state', state);
+  res.redirect(authorizeUrl.toString());
 });
 
 app.get('/api/admin/github/callback', oauthLimiter, async (req, res) => {
-  const cookies = parseCookies(req.headers.cookie || '');
-  const expectedState = verifySignedValue(cookies[OAUTH_STATE_COOKIE]);
+  const stateCookie = parseCookies(req.headers.cookie || '')[OAUTH_STATE_COOKIE];
+  const expectedState = verifySignedValue(stateCookie);
   const returnedState = String(req.query.state || '');
   res.clearCookie(OAUTH_STATE_COOKIE, cookieOptions(0));
-  if (!expectedState || !returnedState || !safeEqual(expectedState, returnedState) || req.query.error || !req.query.code) {
-    return res.status(400).send('GitHub login was cancelled or could not be verified. Please return to the marketplace and try again.');
+  if (!expectedState || !returnedState || !safeEqual(expectedState, returnedState) || req.query.error || typeof req.query.code !== 'string') {
+    return res.status(400).send('GitHub sign-in was cancelled or could not be verified. Return to the marketplace and try again.');
   }
-  if (!ADMIN_ENABLED) return res.status(503).send('GitHub admin login is not configured on this server.');
+  if (!ADMIN_ENABLED) return res.status(503).send('GitHub admin sign-in is not configured on this server.');
 
   try {
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'Free-Minecraft-Addon-Marketplace' },
-      body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, client_secret: GITHUB_CLIENT_SECRET, code: String(req.query.code), redirect_uri: callbackUrl(req) })
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'Minecraft-Addon-Marketplace' },
+      body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, client_secret: GITHUB_CLIENT_SECRET, code: req.query.code, redirect_uri: oauthCallbackUrl(req) })
     });
     const tokenData = await tokenResponse.json();
-    if (!tokenResponse.ok || !tokenData.access_token) return res.status(401).send('Could not sign in with GitHub. Please try again.');
-    const userResponse = await fetch('https://api.github.com/user', {
-      headers: { Authorization: `Bearer ${tokenData.access_token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'Free-Minecraft-Addon-Marketplace' }
-    });
-    if (!userResponse.ok) return res.status(401).send('Could not verify the GitHub account. Please try again.');
-    const githubUser = await userResponse.json();
-    if (String(githubUser.login || '').toLowerCase() !== ADMIN_GITHUB_USERNAME) {
-      return res.status(403).send('This GitHub account does not have marketplace admin access.');
-    }
+    if (!tokenResponse.ok || !tokenData.access_token) return res.status(401).send('GitHub sign-in could not be completed. Please try again.');
 
-    const payload = Buffer.from(JSON.stringify({ username: ADMIN_GITHUB_USERNAME, expiresAt: Date.now() + ADMIN_COOKIE_MAX_AGE })).toString('base64url');
-    res.cookie(ADMIN_COOKIE, signedValue(payload), { ...cookieOptions(ADMIN_COOKIE_MAX_AGE), sameSite: 'strict' });
+    const userResponse = await fetch('https://api.github.com/user', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'Minecraft-Addon-Marketplace' }
+    });
+    if (!userResponse.ok) return res.status(401).send('GitHub could not verify the signed-in account. Please try again.');
+    const githubUser = await userResponse.json();
+    const username = String(githubUser.login || '').toLowerCase();
+    if (username !== ADMIN_GITHUB_USERNAME) return res.status(403).send('This GitHub account is not authorized to administer this marketplace.');
+
+    const sessionPayload = Buffer.from(JSON.stringify({ username, expiresAt: Date.now() + ADMIN_COOKIE_MAX_AGE })).toString('base64url');
+    res.cookie(ADMIN_COOKIE, signedValue(sessionPayload), cookieOptions(ADMIN_COOKIE_MAX_AGE, 'strict'));
     res.redirect('/');
   } catch (error) {
-    console.error('GitHub OAuth failed:', error);
-    res.status(502).send('Could not reach GitHub to complete login. Please try again later.');
+    console.error('GitHub OAuth request failed:', error);
+    res.status(502).send('Could not reach GitHub to complete sign-in. Please try again later.');
   }
 });
 
 app.post('/api/admin/logout', requireAdmin, (_req, res) => {
-  res.clearCookie(ADMIN_COOKIE, { ...cookieOptions(0), sameSite: 'strict' });
+  res.clearCookie(ADMIN_COOKIE, cookieOptions(0, 'strict'));
   res.json({ authenticated: false });
 });
 
@@ -242,9 +259,9 @@ app.delete('/api/addons/:id', requireAdmin, (req, res, next) => {
     const row = db.prepare('SELECT file_storage_name, image_storage_name FROM addons WHERE id = ?').get(req.params.id);
     if (!row) return res.status(404).json({ error: 'Add-on not found.' });
     db.prepare('DELETE FROM addons WHERE id = ?').run(req.params.id);
-    for (const name of [row.file_storage_name, row.image_storage_name]) {
-      if (!name) continue;
-      try { fs.unlinkSync(path.join(UPLOAD_DIR, path.basename(name))); } catch (error) {
+    for (const storedName of [row.file_storage_name, row.image_storage_name]) {
+      if (!storedName) continue;
+      try { fs.unlinkSync(path.join(UPLOAD_DIR, path.basename(storedName))); } catch (error) {
         if (error.code !== 'ENOENT') console.error('Could not remove uploaded file:', error.message);
       }
     }
