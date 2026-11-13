@@ -1,6 +1,6 @@
 # Free community Minecraft add-on marketplace
 
-This is a fan-made community marketplace for sharing and downloading files for free. The Node.js backend serves the site, stores listing details in SQLite, and saves uploaded files on disk so visitors to the same deployed instance can see and download them.
+This fan-made marketplace lets the community upload and download files for free. The Node.js backend stores listing details in SQLite and uploaded files on disk.
 
 ## Run locally
 
@@ -11,17 +11,35 @@ npm install
 npm start
 ```
 
-Open <http://localhost:3000>. Uploaded listing data and files are stored in the `data/` directory, which is created automatically and excluded from Git.
+Open <http://localhost:3000>. Listing data and uploaded files are stored in the `data/` directory, created automatically and excluded from Git.
+
+## Admin mode
+
+Admin deletion is protected on the server; hiding or showing buttons in the browser is not the security boundary. Configure two environment variables before starting the server:
+
+- `ADMIN_PASSWORD`: a strong password at least 12 characters long.
+- `SESSION_SECRET`: a random secret at least 32 characters long, used to sign the admin login cookie.
+
+Example for macOS/Linux:
+
+```sh
+ADMIN_PASSWORD='use-a-long-unique-password-here' SESSION_SECRET="$(openssl rand -hex 32)" npm start
+```
+
+On Windows PowerShell, set them for the current terminal before running `npm start`:
+
+```powershell
+$env:ADMIN_PASSWORD = 'use-a-long-unique-password-here'
+$env:SESSION_SECRET = 'paste-a-random-secret-at-least-32-characters'
+npm start
+```
+
+Open the site, choose **Admin login**, and enter `ADMIN_PASSWORD`. The browser receives a signed, HTTP-only, same-site cookie that expires after 8 hours. Admin mode then adds a Delete button to each listing; deleting removes its database record and uploaded files. Admin login is hidden and disabled if the variables are not configured. Never commit secrets to the repository. Use HTTPS in production; secure cookies are enabled when `NODE_ENV=production`.
 
 ## Deploying
 
-Deploy the Node.js app to a host that supports persistent disk storage. Set `DATA_DIR` to a persistent mounted directory and `PORT` if your host requires it. Back up the entire data directory: it contains both `marketplace.sqlite` and the uploaded files. GitHub Pages is static hosting and cannot run this backend; use a Node.js host instead.
+Deploy the Node.js app to a host that supports persistent disk storage. Set `DATA_DIR` to a persistent mounted directory and `PORT` if required. Configure `ADMIN_PASSWORD` and `SESSION_SECRET` as private host environment variables, not in source files. Back up the entire data directory, including the SQLite database and uploads. GitHub Pages cannot run this backend; use a Node.js host instead.
 
-The API supports listing add-ons (`GET /api/addons`), uploading (`POST /api/addons`, multipart form fields), and downloading (`GET /api/addons/:id/file`). Uploads accept any file extension and are limited to 100 MB; optional cover images are PNG, JPEG, or WebP and limited to 3 MB. Uploads are rate-limited to 10 per IP per 15 minutes. Files are stored outside the public web directory and only made available through the download endpoint.
+Uploads accept any file extension and are limited to 100 MB. Optional cover images are PNG, JPEG, or WebP and limited to 3 MB. Uploads are rate-limited to 10 per IP per 15 minutes. Admin login attempts are rate-limited. Anyone can submit public content, so only expose the marketplace publicly if you are prepared to moderate uploads and manage storage. Review files before opening downloads; never run uploaded files on the server.
 
-## Important notes
-
-- This starter does not include user accounts, moderation, or an admin deletion interface. Anyone can submit public content, so only expose it publicly if you are prepared to moderate uploads and manage storage.
-- The rate limit is a basic abuse guard, not a complete spam or malware defense. Review files before opening downloads to the public; do not run uploaded files on the server.
-- SQLite and local disk are appropriate for a small deployment. For larger traffic or multiple app instances, use a managed database and object storage with persistent shared services.
-- This project is fan-made and is not affiliated with Mojang or Microsoft.
+SQLite and local disk are suitable for a small deployment. For larger traffic or multiple app instances, use a managed database and object storage with persistent shared services. This project is fan-made and is not affiliated with Mojang or Microsoft.

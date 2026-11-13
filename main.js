@@ -5,7 +5,6 @@
   const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
   const allowedImageTypes = ['image/jpeg', 'image/png', 'image/webp'];
   const categoryIcons = { Adventure: '🧭', Blocks: '🧱', Cosmetics: '✨', Mobs: '🐾', Tools: '⚒️', Other: '🌿' };
-
   const grid = document.getElementById('addonGrid');
   const searchInput = document.getElementById('searchInput');
   const categoryFilter = document.getElementById('categoryFilter');
@@ -17,9 +16,17 @@
   const addonFileInput = document.getElementById('addonFile');
   addonFileInput.removeAttribute('accept');
   addonFileInput.nextElementSibling.textContent = 'Minecraft packs/worlds and other file types · Max 100 MB';
-
   let addons = [];
+  let isAdmin = false;
   let toastTimer;
+
+  const adminButton = document.createElement('button');
+  adminButton.type = 'button';
+  adminButton.className = 'btn btn-quiet';
+  adminButton.textContent = 'Admin login';
+  adminButton.style.padding = '10px 12px';
+  adminButton.addEventListener('click', () => isAdmin ? logoutAdmin() : showAdminLogin());
+  document.querySelector('.nav-right').prepend(adminButton);
 
   function make(tag, className, text) {
     const element = document.createElement(tag);
@@ -36,16 +43,105 @@
   }
 
   async function api(path, options) {
-    const response = await fetch(path, options);
+    const response = await fetch(path, { credentials: 'same-origin', ...options });
     if (!response.ok) {
       let message = `Request failed (${response.status}).`;
-      try {
-        const body = await response.json();
-        if (body.error) message = body.error;
-      } catch { /* Response may not include JSON. */ }
+      try { const body = await response.json(); if (body.error) message = body.error; } catch { /* May not be JSON. */ }
       throw new Error(message);
     }
     return response.json();
+  }
+
+  async function checkAdminStatus() {
+    try {
+      const status = await api('/api/admin/status');
+      isAdmin = Boolean(status.authenticated);
+      adminButton.hidden = !status.enabled;
+      updateAdminUI();
+    } catch { adminButton.hidden = true; }
+  }
+
+  function updateAdminUI() {
+    adminButton.textContent = isAdmin ? 'Admin mode · Log out' : 'Admin login';
+    adminButton.className = isAdmin ? 'btn btn-primary' : 'btn btn-quiet';
+    render();
+  }
+
+  function showAdminLogin() {
+    const backdrop = make('div', 'modal-backdrop');
+    backdrop.classList.add('open');
+    backdrop.setAttribute('role', 'dialog');
+    backdrop.setAttribute('aria-modal', 'true');
+    backdrop.setAttribute('aria-labelledby', 'adminLoginTitle');
+    const loginForm = make('form', 'modal');
+    const heading = make('div', 'modal-head');
+    const headingText = make('div');
+    headingText.append(make('h2', '', 'Admin login'), make('p', '', 'Enter the server-configured admin password to manage listings.'));
+    const close = make('button', 'close', '×');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Close');
+    close.addEventListener('click', () => backdrop.remove());
+    heading.append(headingText, close);
+    const field = make('div', 'field');
+    const label = make('label', '', 'Admin password');
+    label.htmlFor = 'adminPassword';
+    const password = make('input');
+    password.id = 'adminPassword';
+    password.type = 'password';
+    password.autocomplete = 'current-password';
+    password.required = true;
+    password.maxLength = 256;
+    field.append(label, password);
+    const error = make('p', 'form-error');
+    error.setAttribute('role', 'alert');
+    const actions = make('div', 'modal-actions');
+    const cancel = make('button', 'btn btn-quiet', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', () => backdrop.remove());
+    const submit = make('button', 'btn btn-primary', 'Log in');
+    submit.type = 'submit';
+    actions.append(cancel, submit);
+    loginForm.append(heading, field, error, actions);
+    backdrop.append(loginForm);
+    backdrop.addEventListener('click', event => { if (event.target === backdrop) backdrop.remove(); });
+    loginForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      error.textContent = '';
+      submit.disabled = true;
+      try {
+        await api('/api/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: password.value }) });
+        isAdmin = true;
+        backdrop.remove();
+        updateAdminUI();
+        showToast('Admin mode enabled. You can now remove listings.');
+      } catch (loginError) {
+        error.textContent = loginError.message;
+      } finally { submit.disabled = false; }
+    });
+    document.body.append(backdrop);
+    password.focus();
+  }
+
+  async function logoutAdmin() {
+    try {
+      await api('/api/admin/logout', { method: 'POST', headers: { 'X-Admin-Action': 'true' } });
+      isAdmin = false;
+      updateAdminUI();
+      showToast('Logged out of admin mode.');
+    } catch (error) { showToast(error.message); }
+  }
+
+  async function deleteAddon(addon) {
+    if (!window.confirm(`Permanently delete “${addon.title}” and its uploaded files?`)) return;
+    try {
+      await api(`/api/addons/${encodeURIComponent(addon.id)}`, { method: 'DELETE', headers: { 'X-Admin-Action': 'true' } });
+      addons = addons.filter(item => item.id !== addon.id);
+      render();
+      showToast('Add-on deleted.');
+    } catch (error) {
+      if (error.message.includes('login required')) { isAdmin = false; updateAdminUI(); }
+      showToast(error.message);
+    }
   }
 
   async function loadAddons() {
@@ -56,11 +152,7 @@
     } catch (error) {
       grid.replaceChildren();
       const message = make('div', 'empty');
-      message.append(
-        make('div', 'empty-icon', '⚠️'),
-        make('strong', '', 'Marketplace backend unavailable'),
-        make('p', '', `${error.message} Start the app with npm start to connect to the shared database.`)
-      );
+      message.append(make('div', 'empty-icon', '⚠️'), make('strong', '', 'Marketplace backend unavailable'), make('p', '', `${error.message} Start the app with npm start to connect to the shared database.`));
       grid.append(message);
     }
   }
@@ -109,10 +201,22 @@
     const foot = make('div', 'card-foot');
     const details = make('span', 'category', `${formatBytes(addon.fileSize)} · ${addon.fileName}`);
     details.title = `${category} · ${addon.fileName}`;
+    const actions = make('div');
+    actions.style.display = 'flex';
+    actions.style.alignItems = 'center';
+    actions.style.gap = '6px';
     const download = make('a', 'btn btn-primary download', '↓ Download');
     download.href = `/api/addons/${encodeURIComponent(addon.id)}/file`;
     download.setAttribute('aria-label', `Download ${addon.title}`);
-    foot.append(details, download);
+    actions.append(download);
+    if (isAdmin) {
+      const remove = make('button', 'btn btn-quiet download', 'Delete');
+      remove.type = 'button';
+      remove.setAttribute('aria-label', `Delete ${addon.title}`);
+      remove.addEventListener('click', () => deleteAddon(addon));
+      actions.append(remove);
+    }
+    foot.append(details, actions);
     body.append(foot);
     card.append(cover, body);
     return card;
@@ -123,18 +227,8 @@
     return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  function showModal() {
-    errorBox.textContent = '';
-    modal.classList.add('open');
-    document.getElementById('addonTitle').focus();
-  }
-
-  function closeModal() {
-    modal.classList.remove('open');
-    form.reset();
-    errorBox.textContent = '';
-  }
-
+  function showModal() { errorBox.textContent = ''; modal.classList.add('open'); document.getElementById('addonTitle').focus(); }
+  function closeModal() { modal.classList.remove('open'); form.reset(); errorBox.textContent = ''; }
   document.getElementById('openUpload').addEventListener('click', showModal);
   document.getElementById('heroUpload').addEventListener('click', showModal);
   document.getElementById('closeModal').addEventListener('click', closeModal);
@@ -150,32 +244,16 @@
     const values = new FormData(form);
     const file = values.get('file');
     const image = values.get('image');
-    if (!(file instanceof File) || !file.size) {
-      errorBox.textContent = 'Choose a file to upload.';
-      return;
-    }
-    if (file.size > MAX_ADDON_BYTES) {
-      errorBox.textContent = 'Files must be 100 MB or smaller.';
-      return;
-    }
+    if (!(file instanceof File) || !file.size) { errorBox.textContent = 'Choose a file to upload.'; return; }
+    if (file.size > MAX_ADDON_BYTES) { errorBox.textContent = 'Files must be 100 MB or smaller.'; return; }
     if (image instanceof File && image.size) {
-      if (!allowedImageTypes.includes(image.type)) {
-        errorBox.textContent = 'Cover images must be PNG, JPG, or WebP.';
-        return;
-      }
-      if (image.size > MAX_IMAGE_BYTES) {
-        errorBox.textContent = 'Cover images must be 3 MB or smaller.';
-        return;
-      }
+      if (!allowedImageTypes.includes(image.type)) { errorBox.textContent = 'Cover images must be PNG, JPG, or WebP.'; return; }
+      if (image.size > MAX_IMAGE_BYTES) { errorBox.textContent = 'Cover images must be 3 MB or smaller.'; return; }
     }
-
     const upload = new FormData();
-    for (const name of ['title', 'author', 'version', 'description', 'category']) {
-      upload.append(name, String(values.get(name) || '').trim());
-    }
+    for (const name of ['title', 'author', 'version', 'description', 'category']) upload.append(name, String(values.get(name) || '').trim());
     upload.append('file', file, file.name);
     if (image instanceof File && image.size) upload.append('image', image, image.name);
-
     submitButton.disabled = true;
     submitButton.textContent = 'Uploading…';
     try {
@@ -183,13 +261,10 @@
       await loadAddons();
       closeModal();
       showToast('Your add-on is now shared with everyone!');
-    } catch (error) {
-      errorBox.textContent = error.message || 'Upload failed. Please try again.';
-    } finally {
-      submitButton.disabled = false;
-      submitButton.textContent = 'Share for free';
-    }
+    } catch (error) { errorBox.textContent = error.message || 'Upload failed. Please try again.'; }
+    finally { submitButton.disabled = false; submitButton.textContent = 'Share for free'; }
   });
 
+  checkAdminStatus();
   loadAddons();
 })();
