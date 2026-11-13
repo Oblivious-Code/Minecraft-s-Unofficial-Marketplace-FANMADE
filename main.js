@@ -19,30 +19,20 @@
   let addons = [];
   let isAdmin = false;
   let toastTimer;
-  let secretClickCount = 0;
-  let secretClickTimer;
 
-  const adminStyle = document.createElement('style');
-  adminStyle.textContent = '.admin-trigger{position:fixed;left:8px;bottom:8px;z-index:8;width:27px;height:27px;padding:0;border:1px solid #a4ec6633;border-radius:8px;background:#171e19;color:#a4ec66;font-size:13px;opacity:.1;transition:opacity .2s,transform .2s}.admin-trigger:hover,.admin-trigger:focus-visible{opacity:.95;transform:scale(1.08);outline:2px solid #a4ec66;outline-offset:2px}.admin-trigger[hidden]{display:none}';
-  document.head.append(adminStyle);
   const adminButton = document.createElement('button');
   adminButton.type = 'button';
-  adminButton.className = 'admin-trigger';
-  adminButton.textContent = '▦';
-  adminButton.title = 'Marketplace owner sign-in (double-press)';
-  adminButton.setAttribute('aria-label', 'Marketplace owner sign-in. Press twice quickly to continue to GitHub.');
+  adminButton.className = 'btn btn-quiet';
+  adminButton.textContent = 'AdminLogs';
+  adminButton.title = 'Sign in with the authorized GitHub account to manage add-ons';
+  adminButton.setAttribute('aria-label', 'AdminLogs: sign in with GitHub for admin access');
+  adminButton.style.padding = '10px 12px';
   adminButton.hidden = true;
   adminButton.addEventListener('click', () => {
-    secretClickCount += 1;
-    clearTimeout(secretClickTimer);
-    if (secretClickCount >= 2) {
-      secretClickCount = 0;
-      window.location.assign('/api/admin/github');
-      return;
-    }
-    secretClickTimer = setTimeout(() => { secretClickCount = 0; }, 700);
+    if (isAdmin) logoutAdmin();
+    else window.location.assign('/api/admin/github');
   });
-  document.body.append(adminButton);
+  document.querySelector('.nav-right').prepend(adminButton);
 
   function make(tag, className, text) {
     const element = document.createElement(tag);
@@ -73,11 +63,47 @@
       const status = await api('/api/admin/status');
       isAdmin = Boolean(status.authenticated);
       adminButton.hidden = !status.enabled;
-      adminButton.textContent = isAdmin ? '✓' : '▦';
-      adminButton.title = isAdmin ? `Admin signed in as @${status.username}` : 'Marketplace owner sign-in (double-press)';
-      adminButton.setAttribute('aria-label', isAdmin ? `Admin signed in as ${status.username}. Double-press to sign out.` : 'Marketplace owner sign-in. Press twice quickly to continue to GitHub.');
+      adminButton.textContent = isAdmin ? `AdminLogs · @${status.username}` : 'AdminLogs';
+      adminButton.className = isAdmin ? 'btn btn-primary' : 'btn btn-quiet';
+      adminButton.title = isAdmin ? 'Click to sign out of admin mode' : 'Sign in with the authorized GitHub account to manage add-ons';
+      adminButton.setAttribute('aria-label', isAdmin ? `AdminLogs: signed in as ${status.username}; click to sign out` : 'AdminLogs: sign in with GitHub for admin access');
       render();
     } catch { adminButton.hidden = true; }
+  }
+
+  async function logoutAdmin() {
+    try {
+      await api('/api/admin/logout', { method: 'POST', headers: { 'X-Admin-Action': 'true' } });
+      isAdmin = false;
+      await checkAdminStatus();
+      showToast('Logged out of admin mode.');
+    } catch (error) { showToast(error.message); }
+  }
+
+  async function deleteAddon(addon) {
+    if (!window.confirm(`Permanently delete “${addon.title}” and its uploaded files?`)) return;
+    try {
+      await api(`/api/addons/${encodeURIComponent(addon.id)}`, { method: 'DELETE', headers: { 'X-Admin-Action': 'true' } });
+      addons = addons.filter(item => item.id !== addon.id);
+      render();
+      showToast('Add-on deleted.');
+    } catch (error) {
+      if (error.message.includes('login required')) { isAdmin = false; await checkAdminStatus(); }
+      showToast(error.message);
+    }
+  }
+
+  async function loadAddons() {
+    try {
+      const result = await api('/api/addons');
+      addons = result.addons;
+      render();
+    } catch (error) {
+      grid.replaceChildren();
+      const message = make('div', 'empty');
+      message.append(make('div', 'empty-icon', '⚠️'), make('strong', '', 'Marketplace backend unavailable'), make('p', '', `${error.message} Start the app with npm start to connect to the shared database.`));
+      grid.append(message);
+    }
   }
 
   function render() {
@@ -148,46 +174,6 @@
   function formatBytes(bytes) {
     if (!Number.isFinite(bytes) || bytes <= 0) return 'File';
     return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-
-  async function deleteAddon(addon) {
-    if (!window.confirm(`Permanently delete “${addon.title}” and its uploaded files?`)) return;
-    try {
-      await api(`/api/addons/${encodeURIComponent(addon.id)}`, { method: 'DELETE', headers: { 'X-Admin-Action': 'true' } });
-      addons = addons.filter(item => item.id !== addon.id);
-      render();
-      showToast('Add-on deleted.');
-    } catch (error) {
-      if (error.message.includes('login required')) { isAdmin = false; checkAdminStatus(); }
-      showToast(error.message);
-    }
-  }
-
-  async function logoutAdmin() {
-    try {
-      await api('/api/admin/logout', { method: 'POST', headers: { 'X-Admin-Action': 'true' } });
-      isAdmin = false;
-      checkAdminStatus();
-      showToast('Logged out of admin mode.');
-    } catch (error) { showToast(error.message); }
-  }
-
-  adminButton.addEventListener('dblclick', event => {
-    event.preventDefault();
-    if (isAdmin) logoutAdmin();
-  });
-
-  async function loadAddons() {
-    try {
-      const result = await api('/api/addons');
-      addons = result.addons;
-      render();
-    } catch (error) {
-      grid.replaceChildren();
-      const message = make('div', 'empty');
-      message.append(make('div', 'empty-icon', '⚠️'), make('strong', '', 'Marketplace backend unavailable'), make('p', '', `${error.message} Start the app with npm start to connect to the shared database.`));
-      grid.append(message);
-    }
   }
 
   function showModal() { errorBox.textContent = ''; modal.classList.add('open'); document.getElementById('addonTitle').focus(); }
