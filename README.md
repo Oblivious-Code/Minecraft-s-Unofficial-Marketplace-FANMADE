@@ -1,6 +1,6 @@
 # Free community Minecraft add-on marketplace
 
-This fan-made marketplace lets the community upload and download files for free. The Node.js backend stores listing details in SQLite and uploaded files on disk.
+This fan-made marketplace lets the community upload and download files for free. Listing details are stored in SQLite and uploaded files on disk.
 
 ## Run locally
 
@@ -11,35 +11,31 @@ npm install
 npm start
 ```
 
-Open <http://localhost:3000>. Listing data and uploaded files are stored in the `data/` directory, created automatically and excluded from Git.
+Open <http://localhost:3000>. Data is stored in the `data/` directory.
 
-## Admin mode
+## Owner admin login with GitHub
 
-Admin deletion is protected on the server; hiding or showing buttons in the browser is not the security boundary. Configure two environment variables before starting the server:
+A small, low-visibility button sits at the bottom-left of the marketplace. Press it twice quickly to sign in through GitHub. Admin access is granted only when GitHub confirms the account username matches `ADMIN_GITHUB_USERNAME` (defaults to `Oblivious-Code`). A successful login shows Delete buttons; deletion is also enforced by the backend.
 
-- `ADMIN_PASSWORD`: a strong password at least 12 characters long.
-- `SESSION_SECRET`: a random secret at least 32 characters long, used to sign the admin login cookie.
+To enable it:
+
+1. Create a GitHub OAuth App in your GitHub account settings. Set its Authorization callback URL to the exact URL `https://YOUR-DOMAIN/api/admin/github/callback` (for local development, use `http://localhost:3000/api/admin/github/callback`).
+2. Configure these environment variables on the server. Never commit the client secret:
+   - `GITHUB_CLIENT_ID`
+   - `GITHUB_CLIENT_SECRET`
+   - `SESSION_SECRET` (at least 32 characters; use a random value)
+   - optionally `ADMIN_GITHUB_USERNAME` (defaults to `Oblivious-Code`)
+   - optionally `GITHUB_CALLBACK_URL` if the app is behind a proxy or has a fixed public callback URL
+3. Restart the backend. The login button appears when the OAuth settings are valid.
 
 Example for macOS/Linux:
 
 ```sh
-ADMIN_PASSWORD='use-a-long-unique-password-here' SESSION_SECRET="$(openssl rand -hex 32)" npm start
+GITHUB_CLIENT_ID='your-client-id' GITHUB_CLIENT_SECRET='your-client-secret' ADMIN_GITHUB_USERNAME='Oblivious-Code' SESSION_SECRET="$(openssl rand -hex 32)" npm start
 ```
 
-On Windows PowerShell, set them for the current terminal before running `npm start`:
+Use HTTPS in production; the admin session cookie is HTTP-only, signed, and expires after 8 hours. GitHub authorization requests only the `read:user` scope. GitHub login only works when the OAuth app and callback URL are configured; it does not detect a GitHub account already signed in to the browser without that OAuth verification.
 
-```powershell
-$env:ADMIN_PASSWORD = 'use-a-long-unique-password-here'
-$env:SESSION_SECRET = 'paste-a-random-secret-at-least-32-characters'
-npm start
-```
+## Deploying and safety
 
-Open the site, choose **Admin login**, and enter `ADMIN_PASSWORD`. The browser receives a signed, HTTP-only, same-site cookie that expires after 8 hours. Admin mode then adds a Delete button to each listing; deleting removes its database record and uploaded files. Admin login is hidden and disabled if the variables are not configured. Never commit secrets to the repository. Use HTTPS in production; secure cookies are enabled when `NODE_ENV=production`.
-
-## Deploying
-
-Deploy the Node.js app to a host that supports persistent disk storage. Set `DATA_DIR` to a persistent mounted directory and `PORT` if required. Configure `ADMIN_PASSWORD` and `SESSION_SECRET` as private host environment variables, not in source files. Back up the entire data directory, including the SQLite database and uploads. GitHub Pages cannot run this backend; use a Node.js host instead.
-
-Uploads accept any file extension and are limited to 100 MB. Optional cover images are PNG, JPEG, or WebP and limited to 3 MB. Uploads are rate-limited to 10 per IP per 15 minutes. Admin login attempts are rate-limited. Anyone can submit public content, so only expose the marketplace publicly if you are prepared to moderate uploads and manage storage. Review files before opening downloads; never run uploaded files on the server.
-
-SQLite and local disk are suitable for a small deployment. For larger traffic or multiple app instances, use a managed database and object storage with persistent shared services. This project is fan-made and is not affiliated with Mojang or Microsoft.
+Deploy the Node.js app to a host with persistent disk storage; GitHub Pages cannot run this backend. Set `DATA_DIR` to persistent storage and back up the entire directory. Uploads accept any file extension, are limited to 100 MB, and are rate-limited. Anyone can submit public content, so moderate uploads and review files before making downloads public. Never run uploaded files on the server. This project is fan-made and is not affiliated with Mojang or Microsoft.

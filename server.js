@@ -15,15 +15,16 @@ const MAX_ADDON_BYTES = 100 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
 const categories = new Set(['Adventure', 'Blocks', 'Cosmetics', 'Mobs', 'Tools', 'Other']);
 const imageTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
+const ADMIN_GITHUB_USERNAME = (process.env.ADMIN_GITHUB_USERNAME || 'Oblivious-Code').replace(/^@/, '').toLowerCase();
 const SESSION_SECRET = process.env.SESSION_SECRET || '';
-const ADMIN_ENABLED = ADMIN_PASSWORD.length >= 12 && SESSION_SECRET.length >= 32;
+const ADMIN_ENABLED = Boolean(GITHUB_CLIENT_ID && GITHUB_CLIENT_SECRET && SESSION_SECRET.length >= 32 && ADMIN_GITHUB_USERNAME);
 const ADMIN_COOKIE = 'marketplace_admin';
+const OAUTH_STATE_COOKIE = 'marketplace_oauth_state';
 const ADMIN_COOKIE_MAX_AGE = 8 * 60 * 60 * 1000;
 
-if (ADMIN_PASSWORD && ADMIN_PASSWORD.length < 12) console.warn('Admin mode disabled: ADMIN_PASSWORD must be at least 12 characters.');
-if (SESSION_SECRET && SESSION_SECRET.length < 32) console.warn('Admin mode disabled: SESSION_SECRET must be at least 32 characters.');
-if (!ADMIN_ENABLED) console.warn('Admin mode is disabled. Configure ADMIN_PASSWORD (12+ chars) and SESSION_SECRET (32+ chars).');
+if (!ADMIN_ENABLED) console.warn('Admin mode is disabled. Configure GitHub OAuth credentials and a SESSION_SECRET (32+ characters).');
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const db = new Database(path.join(DATA_DIR, 'marketplace.sqlite'));
@@ -65,20 +66,8 @@ const upload = multer({
   }
 });
 
-const uploadLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Upload limit reached. Please try again in a little while.' }
-});
-const adminLoginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many admin login attempts. Try again in 15 minutes.' }
-});
+const uploadLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false, message: { error: 'Upload limit reached. Please try again in a little while.' } });
+const oauthLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: 'Too many login attempts. Try again in a little while.' } });
 
 function cleanOriginalName(value) {
   const basename = path.posix.basename(String(value || '').replace(/\\/g, '/'));
@@ -94,11 +83,17 @@ function removeUploadedFiles(files) {
 }
 
 function publicAddon(row) {
-  return {
-    id: row.id, title: row.title, author: row.author, version: row.version,
-    description: row.description, category: row.category, fileName: row.file_name,
-    fileSize: row.file_size, hasImage: Boolean(row.image_storage_name), createdAt: row.created_at
-  };
+  return { id: row.id, title: row.title, author: row.author, version: row.version, description: row.description, category: row.category, fileName: row.file_name, fileSize: row.file_size, hasImage: Boolean(row.image_storage_name), createdAt: row.created_at };
+}
+
+function parseCookies(header) {
+  const cookies = {};
+  for (const part of header.split(';')) {
+    const index = part.indexOf('=');
+    if (index < 0) continue;
+    try { cookies[part.slice(0, index).trim()] = decodeURIComponent(part.slice(index + 1).trim()); } catch { /* Ignore malformed cookie. */ }
+  }
+  return cookies;
 }
 
 function safeEqual(a, b) {
@@ -107,34 +102,31 @@ function safeEqual(a, b) {
   return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
-function makeAdminToken(expiresAt) {
-  const payload = String(expiresAt);
-  const signature = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
-  return `${payload}.${signature}`;
+function sign(value) {
+  return crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('base64url');
+}
+
+function signedValue(value) { return `${value}.${sign(value)}`; }
+function verifySignedValue(value) {
+  if (!value) return null;
+  const separator = value.lastIndexOf('.');
+  if (separator < 1) return null;
+  const payload = value.slice(0, separator);
+  return safeEqual(value.slice(separator + 1), sign(payload)) ? payload : null;
 }
 
 function isAdmin(req) {
   if (!ADMIN_ENABLED) return false;
-  const token = req.cookies?.[ADMIN_COOKIE] || parseCookies(req.headers.cookie || '')[ADMIN_COOKIE];
-  if (!token) return false;
-  const [expiresAt, signature, extra] = token.split('.');
-  if (extra !== undefined || !/^\d+$/.test(expiresAt) || Number(expiresAt) <= Date.now()) return false;
-  return safeEqual(signature, crypto.createHmac('sha256', SESSION_SECRET).update(expiresAt).digest('base64url'));
-}
-
-function parseCookies(header) {
-  const cookies = {};
-  for (const part of header.split(';')) {
-    const index = part.indexOf('=');
-    if (index < 0) continue;
-    const name = part.slice(0, index).trim();
-    try { cookies[name] = decodeURIComponent(part.slice(index + 1).trim()); } catch { /* Ignore malformed cookie. */ }
-  }
-  return cookies;
+  const payload = verifySignedValue(parseCookies(req.headers.cookie || '')[ADMIN_COOKIE]);
+  if (!payload) return false;
+  try {
+    const session = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return session.username === ADMIN_GITHUB_USERNAME && Number.isFinite(session.expiresAt) && session.expiresAt > Date.now();
+  } catch { return false; }
 }
 
 function requireAdmin(req, res, next) {
-  if (!ADMIN_ENABLED) return res.status(503).json({ error: 'Admin mode is not configured on this server.' });
+  if (!ADMIN_ENABLED) return res.status(503).json({ error: 'GitHub admin login is not configured on this server.' });
   if (!isAdmin(req)) return res.status(401).json({ error: 'Admin login required.' });
   const origin = req.get('origin');
   if (!origin || origin !== `${req.protocol}://${req.get('host')}` || req.get('x-admin-action') !== 'true') {
@@ -143,25 +135,67 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true }));
-app.get('/api/admin/status', (req, res) => res.json({ enabled: ADMIN_ENABLED, authenticated: isAdmin(req) }));
+function cookieOptions(maxAge) {
+  return { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', maxAge, path: '/' };
+}
 
-app.post('/api/admin/login', adminLoginLimiter, express.json({ limit: '2kb' }), (req, res) => {
-  if (!ADMIN_ENABLED) return res.status(503).json({ error: 'Admin mode is not configured on this server.' });
-  if (!req.get('origin') || req.get('origin') !== `${req.protocol}://${req.get('host')}`) {
-    return res.status(403).json({ error: 'Request could not be verified.' });
+function callbackUrl(req) {
+  return process.env.GITHUB_CALLBACK_URL || `${req.protocol}://${req.get('host')}/api/admin/github/callback`;
+}
+
+app.get('/api/health', (_req, res) => res.json({ ok: true }));
+app.get('/api/admin/status', (req, res) => res.json({ enabled: ADMIN_ENABLED, authenticated: isAdmin(req), username: isAdmin(req) ? ADMIN_GITHUB_USERNAME : null }));
+
+app.get('/api/admin/github', oauthLimiter, (req, res) => {
+  if (!ADMIN_ENABLED) return res.status(503).send('GitHub admin login is not configured on this server.');
+  const state = crypto.randomBytes(32).toString('base64url');
+  res.cookie(OAUTH_STATE_COOKIE, signedValue(state), cookieOptions(10 * 60 * 1000));
+  const authorize = new URL('https://github.com/login/oauth/authorize');
+  authorize.searchParams.set('client_id', GITHUB_CLIENT_ID);
+  authorize.searchParams.set('redirect_uri', callbackUrl(req));
+  authorize.searchParams.set('scope', 'read:user');
+  authorize.searchParams.set('state', state);
+  res.redirect(authorize.toString());
+});
+
+app.get('/api/admin/github/callback', oauthLimiter, async (req, res) => {
+  const cookies = parseCookies(req.headers.cookie || '');
+  const expectedState = verifySignedValue(cookies[OAUTH_STATE_COOKIE]);
+  const returnedState = String(req.query.state || '');
+  res.clearCookie(OAUTH_STATE_COOKIE, cookieOptions(0));
+  if (!expectedState || !returnedState || !safeEqual(expectedState, returnedState) || req.query.error || !req.query.code) {
+    return res.status(400).send('GitHub login was cancelled or could not be verified. Please return to the marketplace and try again.');
   }
-  if (!safeEqual(req.body?.password || '', ADMIN_PASSWORD)) return res.status(401).json({ error: 'Incorrect admin password.' });
-  const expiresAt = Date.now() + ADMIN_COOKIE_MAX_AGE;
-  res.cookie(ADMIN_COOKIE, makeAdminToken(expiresAt), {
-    httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict',
-    maxAge: ADMIN_COOKIE_MAX_AGE, path: '/',
-  });
-  res.json({ authenticated: true });
+  if (!ADMIN_ENABLED) return res.status(503).send('GitHub admin login is not configured on this server.');
+
+  try {
+    const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'User-Agent': 'Free-Minecraft-Addon-Marketplace' },
+      body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, client_secret: GITHUB_CLIENT_SECRET, code: String(req.query.code), redirect_uri: callbackUrl(req) })
+    });
+    const tokenData = await tokenResponse.json();
+    if (!tokenResponse.ok || !tokenData.access_token) return res.status(401).send('Could not sign in with GitHub. Please try again.');
+    const userResponse = await fetch('https://api.github.com/user', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'Free-Minecraft-Addon-Marketplace' }
+    });
+    if (!userResponse.ok) return res.status(401).send('Could not verify the GitHub account. Please try again.');
+    const githubUser = await userResponse.json();
+    if (String(githubUser.login || '').toLowerCase() !== ADMIN_GITHUB_USERNAME) {
+      return res.status(403).send('This GitHub account does not have marketplace admin access.');
+    }
+
+    const payload = Buffer.from(JSON.stringify({ username: ADMIN_GITHUB_USERNAME, expiresAt: Date.now() + ADMIN_COOKIE_MAX_AGE })).toString('base64url');
+    res.cookie(ADMIN_COOKIE, signedValue(payload), { ...cookieOptions(ADMIN_COOKIE_MAX_AGE), sameSite: 'strict' });
+    res.redirect('/');
+  } catch (error) {
+    console.error('GitHub OAuth failed:', error);
+    res.status(502).send('Could not reach GitHub to complete login. Please try again later.');
+  }
 });
 
 app.post('/api/admin/logout', requireAdmin, (_req, res) => {
-  res.clearCookie(ADMIN_COOKIE, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict', path: '/' });
+  res.clearCookie(ADMIN_COOKIE, { ...cookieOptions(0), sameSite: 'strict' });
   res.json({ authenticated: false });
 });
 
@@ -193,14 +227,10 @@ app.post('/api/addons', uploadLimiter, (req, res, next) => {
       if (image && image.size > MAX_IMAGE_BYTES) errors.push('Cover images must be 3 MB or smaller.');
       if (errors.length) { removeUploadedFiles(req.files); res.status(400).json({ error: errors.join(' ') }); return; }
 
-      db.prepare(`INSERT INTO addons (
-        id, title, author, version, description, category, file_name,
-        file_storage_name, file_size, file_mime, image_storage_name, image_mime
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-        req.uploadId, title, author, version, description, category,
-        cleanOriginalName(file.originalname), path.basename(file.filename), file.size,
-        file.mimetype || 'application/octet-stream', image ? path.basename(image.filename) : null,
-        image ? image.mimetype : null
+      db.prepare(`INSERT INTO addons (id, title, author, version, description, category, file_name, file_storage_name, file_size, file_mime, image_storage_name, image_mime)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        req.uploadId, title, author, version, description, category, cleanOriginalName(file.originalname), path.basename(file.filename), file.size,
+        file.mimetype || 'application/octet-stream', image ? path.basename(image.filename) : null, image ? image.mimetype : null
       );
       res.status(201).json({ addon: publicAddon(db.prepare('SELECT * FROM addons WHERE id = ?').get(req.uploadId)) });
     } catch (error) { removeUploadedFiles(req.files); next(error); }
