@@ -25,14 +25,14 @@
   adminButton.type = 'button';
   adminButton.className = 'btn btn-quiet';
   adminButton.textContent = 'AdminLogs';
-  adminButton.title = 'Sign in with the authorized GitHub account to manage add-ons';
-  adminButton.setAttribute('aria-label', 'AdminLogs: sign in with GitHub for admin access');
+  adminButton.title = 'Sign in with the server-configured admin password';
+  adminButton.setAttribute('aria-label', 'AdminLogs: sign in for admin access');
   adminButton.style.padding = '10px 12px';
   if (!adminButton.isConnected) document.querySelector('.nav-right').prepend(adminButton);
   adminButton.addEventListener('click', () => {
     if (isAdmin) logoutAdmin();
-    else if (adminLoginAvailable) window.location.assign('/api/admin/github');
-    else showToast('GitHub admin sign-in is not configured or the backend is unavailable.');
+    else if (adminLoginAvailable) showAdminLogin();
+    else showToast('Admin login is not configured or the backend is unavailable.');
   });
 
   function make(tag, className, text) {
@@ -46,7 +46,7 @@
     toast.textContent = message;
     toast.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => toast.classList.remove('show'), 3000);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 3500);
   }
 
   async function api(path, options) {
@@ -64,15 +64,74 @@
       const status = await api('/api/admin/status');
       adminLoginAvailable = Boolean(status.enabled);
       isAdmin = Boolean(status.authenticated);
-      adminButton.textContent = isAdmin ? `AdminLogs · @${status.username}` : 'AdminLogs';
+      adminButton.textContent = isAdmin ? 'AdminLogs · Signed in' : 'AdminLogs';
       adminButton.className = isAdmin ? 'btn btn-primary' : 'btn btn-quiet';
-      adminButton.title = isAdmin ? 'Click to sign out of admin mode' : adminLoginAvailable ? 'Sign in with the authorized GitHub account to manage add-ons' : 'Admin sign-in is not configured on the backend';
-      adminButton.setAttribute('aria-label', isAdmin ? `AdminLogs: signed in as ${status.username}; click to sign out` : 'AdminLogs: GitHub admin sign-in');
+      adminButton.title = isAdmin ? 'Click to sign out of admin mode' : adminLoginAvailable ? 'Enter the server-configured admin password' : 'Admin password is not configured on the backend';
       render();
     } catch {
       adminLoginAvailable = false;
       adminButton.title = 'Admin button is visible; backend status is unavailable';
     }
+  }
+
+  function showAdminLogin() {
+    const backdrop = make('div', 'modal-backdrop');
+    backdrop.classList.add('open');
+    backdrop.setAttribute('role', 'dialog');
+    backdrop.setAttribute('aria-modal', 'true');
+    backdrop.setAttribute('aria-labelledby', 'adminLoginTitle');
+    const loginForm = make('form', 'modal');
+    const heading = make('div', 'modal-head');
+    const headingText = make('div');
+    headingText.append(make('h2', '', 'Admin login'), make('p', '', 'Enter the admin password to manage marketplace add-ons.'));
+    const close = make('button', 'close', '×');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Close');
+    close.addEventListener('click', () => backdrop.remove());
+    heading.append(headingText, close);
+    const field = make('div', 'field');
+    const label = make('label', '', 'Admin password');
+    label.htmlFor = 'adminPassword';
+    const password = make('input');
+    password.id = 'adminPassword';
+    password.type = 'password';
+    password.name = 'password';
+    password.autocomplete = 'current-password';
+    password.required = true;
+    password.maxLength = 256;
+    field.append(label, password);
+    const error = make('p', 'form-error');
+    error.setAttribute('role', 'alert');
+    const actions = make('div', 'modal-actions');
+    const cancel = make('button', 'btn btn-quiet', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', () => backdrop.remove());
+    const submit = make('button', 'btn btn-primary', 'Log in');
+    submit.type = 'submit';
+    actions.append(cancel, submit);
+    loginForm.append(heading, field, error, actions);
+    backdrop.append(loginForm);
+    backdrop.addEventListener('click', event => { if (event.target === backdrop) backdrop.remove(); });
+    loginForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      error.textContent = '';
+      submit.disabled = true;
+      try {
+        await api('/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: password.value })
+        });
+        isAdmin = true;
+        backdrop.remove();
+        await checkAdminStatus();
+        showToast('Admin mode enabled. You can now delete add-ons.');
+      } catch (loginError) {
+        error.textContent = loginError.message;
+      } finally { submit.disabled = false; }
+    });
+    document.body.append(backdrop);
+    password.focus();
   }
 
   async function logoutAdmin() {
