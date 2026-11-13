@@ -21,20 +21,19 @@
   let adminLoginAvailable = false;
   let toastTimer;
 
-  const adminButton = document.createElement('button');
+  const adminButton = document.getElementById('adminButton') || document.createElement('button');
   adminButton.type = 'button';
   adminButton.className = 'btn btn-quiet';
   adminButton.textContent = 'AdminLogs';
   adminButton.title = 'Sign in with the authorized GitHub account to manage add-ons';
   adminButton.setAttribute('aria-label', 'AdminLogs: sign in with GitHub for admin access');
   adminButton.style.padding = '10px 12px';
-  adminButton.hidden = false;
+  if (!adminButton.isConnected) document.querySelector('.nav-right').prepend(adminButton);
   adminButton.addEventListener('click', () => {
     if (isAdmin) logoutAdmin();
     else if (adminLoginAvailable) window.location.assign('/api/admin/github');
     else showToast('GitHub admin sign-in is not configured or the backend is unavailable.');
   });
-  document.querySelector('.nav-right').prepend(adminButton);
 
   function make(tag, className, text) {
     const element = document.createElement(tag);
@@ -67,14 +66,8 @@
       isAdmin = Boolean(status.authenticated);
       adminButton.textContent = isAdmin ? `AdminLogs · @${status.username}` : 'AdminLogs';
       adminButton.className = isAdmin ? 'btn btn-primary' : 'btn btn-quiet';
-      adminButton.title = isAdmin
-        ? 'Click to sign out of admin mode'
-        : adminLoginAvailable
-          ? 'Sign in with the authorized GitHub account to manage add-ons'
-          : 'Admin button is visible; GitHub admin sign-in is not configured on the backend';
-      adminButton.setAttribute('aria-label', isAdmin
-        ? `AdminLogs: signed in as ${status.username}; click to sign out`
-        : 'AdminLogs: GitHub admin sign-in');
+      adminButton.title = isAdmin ? 'Click to sign out of admin mode' : adminLoginAvailable ? 'Sign in with the authorized GitHub account to manage add-ons' : 'Admin sign-in is not configured on the backend';
+      adminButton.setAttribute('aria-label', isAdmin ? `AdminLogs: signed in as ${status.username}; click to sign out` : 'AdminLogs: GitHub admin sign-in');
       render();
     } catch {
       adminLoginAvailable = false;
@@ -124,9 +117,7 @@
       const searchable = `${addon.title} ${addon.author} ${addon.description} ${addon.category}`.toLocaleLowerCase();
       return (!query || searchable.includes(query)) && (category === 'All' || addon.category === category);
     });
-    document.getElementById('listingCount').textContent = addons.length
-      ? `${addons.length} free ${addons.length === 1 ? 'add-on' : 'add-ons'} shared by the community`
-      : 'Browse what the community has shared';
+    document.getElementById('listingCount').textContent = addons.length ? `${addons.length} free ${addons.length === 1 ? 'add-on' : 'add-ons'} shared by the community` : 'Browse what the community has shared';
     grid.replaceChildren();
     if (!filtered.length) {
       const empty = make('div', 'empty');
