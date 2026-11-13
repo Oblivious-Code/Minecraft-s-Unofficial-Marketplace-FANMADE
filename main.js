@@ -18,6 +18,7 @@
   addonFileInput.nextElementSibling.textContent = 'Minecraft packs/worlds and other file types · Max 100 MB';
   let addons = [];
   let isAdmin = false;
+  let adminLoginAvailable = false;
   let toastTimer;
 
   const adminButton = document.createElement('button');
@@ -27,10 +28,11 @@
   adminButton.title = 'Sign in with the authorized GitHub account to manage add-ons';
   adminButton.setAttribute('aria-label', 'AdminLogs: sign in with GitHub for admin access');
   adminButton.style.padding = '10px 12px';
-  adminButton.hidden = true;
+  adminButton.hidden = false;
   adminButton.addEventListener('click', () => {
     if (isAdmin) logoutAdmin();
-    else window.location.assign('/api/admin/github');
+    else if (adminLoginAvailable) window.location.assign('/api/admin/github');
+    else showToast('GitHub admin sign-in is not configured or the backend is unavailable.');
   });
   document.querySelector('.nav-right').prepend(adminButton);
 
@@ -61,14 +63,23 @@
   async function checkAdminStatus() {
     try {
       const status = await api('/api/admin/status');
+      adminLoginAvailable = Boolean(status.enabled);
       isAdmin = Boolean(status.authenticated);
-      adminButton.hidden = !status.enabled;
       adminButton.textContent = isAdmin ? `AdminLogs · @${status.username}` : 'AdminLogs';
       adminButton.className = isAdmin ? 'btn btn-primary' : 'btn btn-quiet';
-      adminButton.title = isAdmin ? 'Click to sign out of admin mode' : 'Sign in with the authorized GitHub account to manage add-ons';
-      adminButton.setAttribute('aria-label', isAdmin ? `AdminLogs: signed in as ${status.username}; click to sign out` : 'AdminLogs: sign in with GitHub for admin access');
+      adminButton.title = isAdmin
+        ? 'Click to sign out of admin mode'
+        : adminLoginAvailable
+          ? 'Sign in with the authorized GitHub account to manage add-ons'
+          : 'Admin button is visible; GitHub admin sign-in is not configured on the backend';
+      adminButton.setAttribute('aria-label', isAdmin
+        ? `AdminLogs: signed in as ${status.username}; click to sign out`
+        : 'AdminLogs: GitHub admin sign-in');
       render();
-    } catch { adminButton.hidden = true; }
+    } catch {
+      adminLoginAvailable = false;
+      adminButton.title = 'Admin button is visible; backend status is unavailable';
+    }
   }
 
   async function logoutAdmin() {
