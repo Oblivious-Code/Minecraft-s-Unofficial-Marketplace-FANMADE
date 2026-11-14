@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const MAX_ADDON_BYTES = 100 * 1024 * 1024;
+  const MAX_ADDON_BYTES = 100 * 1024 * 1024 * 514;
   const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
   const allowedImageTypes = ['image/jpeg', 'image/png', 'image/webp'];
   const categoryIcons = { Adventure: '🧭', Blocks: '🧱', Cosmetics: '✨', Mobs: '🐾', Tools: '⚒️', Other: '🌿' };
