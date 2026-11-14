@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const MAX_ADDON_BYTES = 100 * 1024 * 1024 * 514;
+  const MAX_ADDON_BYTES = 100 * 1024 * 1024 * 1024;
   const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
   const allowedImageTypes = ['image/jpeg', 'image/png', 'image/webp'];
   const categoryIcons = { Adventure: '🧭', Blocks: '🧱', Cosmetics: '✨', Mobs: '🐾', Tools: '⚒️', Other: '🌿' };
@@ -255,7 +255,7 @@
     const file = values.get('file');
     const image = values.get('image');
     if (!(file instanceof File) || !file.size) { errorBox.textContent = 'Choose a file to upload.'; return; }
-    if (file.size > MAX_ADDON_BYTES) { errorBox.textContent = 'Files must be 100 MB or smaller.'; return; }
+    if (file.size > MAX_ADDON_BYTES) { errorBox.textContent = 'Files must be 100 GB or smaller.'; return; }
     if (image instanceof File && image.size) {
       if (!allowedImageTypes.includes(image.type)) { errorBox.textContent = 'Cover images must be PNG, JPG, or WebP.'; return; }
       if (image.size > MAX_IMAGE_BYTES) { errorBox.textContent = 'Cover images must be 3 MB or smaller.'; return; }
